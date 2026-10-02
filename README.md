@@ -46,8 +46,20 @@ Die Mitgliederverwaltung ist kein einzelnes Programm, sondern setzt sich aus dre
 
 - **Docker Desktop** – das Programm, das die Mitgliederverwaltung in abgeschotteten Behältern („Containern") laufen lässt. [Herunterladen](https://www.docker.com/products/docker-desktop/) und einmal starten.
 - **Git** – zum Herunterladen des Quellcodes. Auf macOS ist es nach `xcode-select --install` dabei, sonst [hier](https://git-scm.com/downloads).
-- **Rund 20 GB freien Speicherplatz** und mindestens **8 GB Arbeitsspeicher**, die Docker nutzen darf.
+- **Rund 8 GB Plattenplatz.** Halte besser 15 GB frei, damit auch spätere Updates Platz haben.
+- **Mindestens 4 GB Arbeitsspeicher**, die Docker nutzen darf – 6 GB sind angenehmer.
 - **macOS oder Linux.** Unter Windows funktioniert es über das Windows-Subsystem für Linux (WSL2).
+
+> [!NOTE]
+> **Wo liegt der Platz eigentlich?** Der Projektordner bleibt mit etwa 0,5 GB klein. Den Löwenanteil legt Docker getrennt davon ab, unter macOS und Windows in seiner eigenen virtuellen Festplatte:
+>
+> | Posten | Ungefähr |
+> |---|---|
+> | Docker-Images (Rails, Mailcatcher, PostgreSQL, Redis) | 6,5 GB |
+> | Heruntergeladene Quellen (`hitobito_testing/`) | 0,5 GB |
+> | Volumes (Ruby-Bibliotheken, Datenbank) | 0,6 GB |
+>
+> Den aktuellen Stand zeigt dir jederzeit `docker system df`.
 
 > [!NOTE]
 > **Wie lange dauert das?** Beim allerersten Mal 15 bis 30 Minuten. In dieser Zeit wird der Quellcode heruntergeladen und die Anwendung gebaut. Das läuft von allein – du kannst in der Zwischenzeit etwas anderes machen. Jeder weitere Start dauert dann nur noch ein bis zwei Minuten.

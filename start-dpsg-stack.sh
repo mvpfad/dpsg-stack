@@ -199,8 +199,10 @@ check_disk_space() {
   local avail_kb
   avail_kb="$(df -Pk "$SCRIPT_DIR" 2>/dev/null | awk 'NR==2 {print $4}')" || return 0
   [ -n "$avail_kb" ] || return 0
-  if [ "$avail_kb" -lt 20000000 ]; then
-    warn "Weniger als 20 GB frei – der Stack braucht mit Images und Quellen ungefähr so viel."
+  # Gemessen belegt der Stack rund 8 GB (Images, Quellen, Volumes). Gewarnt wird
+  # erst darunter, damit die Meldung nicht grundlos kommt.
+  if [ "$avail_kb" -lt 10000000 ]; then
+    warn "Weniger als 10 GB frei – der Stack belegt mit Images und Quellen etwa 8 GB."
   fi
 }
 
