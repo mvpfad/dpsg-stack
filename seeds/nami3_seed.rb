@@ -349,6 +349,11 @@ section "Zwei-Faktor-Authentisierung"
 
 testbenutzer.select { |entry| entry[:two_fa] }.each do |entry|
   person = entry[:person]
+  # Der Setter vergleicht den neuen Wert mit dem alten und entschlüsselt diesen dafür.
+  # Stammt die Datenbank aus einer Installation mit anderem Verschlüsselungsschlüssel –
+  # der wird beim Klonen der Entwicklungsumgebung neu erzeugt –, schlägt das fehl.
+  # Deshalb erst leeren, dann setzen.
+  person.encrypted_two_fa_secret = nil
   person.two_fa_secret = TOTP_SECRET
   person.two_factor_authentication = :totp
   person.save!(validate: false)
