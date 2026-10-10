@@ -361,7 +361,317 @@ testbenutzer.select { |entry| entry[:two_fa] }.each do |entry|
 end
 
 # ---------------------------------------------------------------------------
-# 7. Ergebnis für das Startscript
+# 7. Qualifikationen, Kurskategorien und Kursarten
+# ---------------------------------------------------------------------------
+
+section "Qualifikationen und Kursarten"
+
+# Bezeichnungen sind übersetzte Attribute und liegen in eigenen Tabellen. Gesucht wird
+# deshalb über die Übersetzung, damit mehrfaches Ausführen nichts doppelt anlegt.
+def find_or_build_translated(klass, attribute, value)
+  klass.joins(:translations)
+    .find_by(klass.translation_class.table_name => {attribute => value}) || klass.new
+end
+
+def seed_translated(klass, label, attrs = {})
+  record = find_or_build_translated(klass, :label, label)
+  record.assign_attributes(attrs.merge(label: label))
+  record.save!
+  record
+end
+
+quali_gruppenleitung = seed_translated(QualificationKind, "Gruppenleitung",
+  description: "Abgeschlossene Ausbildung zur Gruppenleitung.",
+  validity: nil)
+quali_erste_hilfe = seed_translated(QualificationKind, "Erste Hilfe",
+  description: "Erste-Hilfe-Ausbildung mit mindestens neun Unterrichtseinheiten.",
+  validity: 3, reactivateable: 1)
+quali_praevention = seed_translated(QualificationKind, "Präventionsschulung",
+  description: "Schulung zur Prävention sexualisierter Gewalt.",
+  validity: 5)
+log "  Qualifikationsarten: Gruppenleitung, Erste Hilfe (3 Jahre), Präventionsschulung (5 Jahre)"
+
+kategorie_ausbildung = seed_translated(Event::KindCategory, "Ausbildung", order: 1)
+kategorie_erste_hilfe = seed_translated(Event::KindCategory, "Erste Hilfe", order: 2)
+log "  Kurskategorien: Ausbildung, Erste Hilfe"
+
+def seed_kind(label, attrs, qualifikationen)
+  kind = seed_translated(Event::Kind, label, attrs)
+  qualifikationen.each do |category, qualification_kind|
+    Event::KindQualificationKind.find_or_create_by!(
+      event_kind: kind, qualification_kind: qualification_kind,
+      category: category.to_s, role: "participant"
+    )
+  end
+  kind
+end
+
+kursart_gruppenleitung = seed_kind("Gruppenleitungskurs", {
+  short_name: "GLK",
+  kind_category: kategorie_ausbildung,
+  minimum_age: 16,
+  general_information: "Grundlagen der Gruppenarbeit: Methoden, Aufsicht, Spielpädagogik.",
+  application_conditions: "Gültige Erste-Hilfe-Ausbildung."
+}, qualification: quali_gruppenleitung, precondition: quali_erste_hilfe)
+
+kursart_erste_hilfe = seed_kind("Erste-Hilfe-Kurs", {
+  short_name: "EH",
+  kind_category: kategorie_erste_hilfe,
+  minimum_age: 14,
+  general_information: "Neun Unterrichtseinheiten Erste Hilfe mit Outdoor-Teil.",
+  application_conditions: nil
+}, qualification: quali_erste_hilfe, prolongation: quali_erste_hilfe)
+
+kursart_praevention = seed_kind("Präventionsschulung", {
+  short_name: "PRÄ",
+  kind_category: kategorie_ausbildung,
+  minimum_age: 16,
+  general_information: "Pflichtschulung für alle Leitenden.",
+  application_conditions: nil
+}, qualification: quali_praevention)
+log "  Kursarten: GLK (Ausbildung), EH (Erste Hilfe), PRÄ (Ausbildung)"
+
+# Qualifikationen für zwei Testbenutzer, damit Personenansichten und die App-Übersicht
+# gültige, bald ablaufende und abgelaufene Einträge zeigen.
+# Je Person und Art genau ein Eintrag; das Startdatum wird bei jedem Lauf nachgezogen,
+# damit „läuft bald ab“ und „abgelaufen“ relativ zu heute stimmen.
+def seed_qualification(person, kind, start_at, origin)
+  qualification = Qualification.find_or_initialize_by(person: person, qualification_kind: kind)
+  qualification.assign_attributes(start_at: start_at, finish_at: nil, origin: origin)
+  qualification.save!
+end
+
+finn = Person.find_by!(email: "stammesfuehrung@example.com")
+lea = Person.find_by!(email: "gruppenleitung@example.com")
+heute = Time.zone.today
+seed_qualification(finn, quali_gruppenleitung, Date.new(2019, 5, 12), "Gruppenleitungskurs")
+seed_qualification(finn, quali_erste_hilfe, heute - 3.years + 2.months, "Erste-Hilfe-Kurs")
+seed_qualification(finn, quali_praevention, Date.new(2023, 3, 4), "Präventionsschulung")
+seed_qualification(lea, quali_erste_hilfe, heute - 3.years - 4.months, "Erste-Hilfe-Kurs")
+log "  Finn: Gruppenleitung, Erste Hilfe (läuft in 2 Monaten ab), Prävention"
+log "  Lea: Erste Hilfe (abgelaufen)"
+
+# ---------------------------------------------------------------------------
+# 8. Veranstaltungen und Kurse
+# ---------------------------------------------------------------------------
+
+section "Veranstaltungen und Kurse"
+
+# Alle Termine liegen relativ zum Tag des Seedens, damit „kommende“ Events auch nach
+# Wochen noch in der Zukunft liegen. Bei jedem Lauf werden die Termine neu gesetzt.
+def um(tage, stunde, minute = 0)
+  (Time.zone.today + tage).in_time_zone.change(hour: stunde, min: minute)
+end
+
+def seed_event(klass, name, group, attrs, termine)
+  event = find_or_build_translated(klass, :name, name)
+  event = klass.new if event.class != klass
+  event.assign_attributes(attrs.merge(name: name))
+  event.groups = [group]
+  event.dates.destroy_all if event.persisted?
+  termine.each { |termin| event.dates.build(termin) }
+  event.save!
+  event
+end
+
+def teilnehmen(event, person, role_type, active: true, application: nil)
+  participation = Event::Participation.find_or_initialize_by(event: event, participant: person)
+  if application && participation.application.nil?
+    participation.application = Event::Application.create!(
+      {priority_1_id: event.id}.merge(application)
+    )
+  end
+  participation.active = active
+  participation.save!
+  unless participation.roles.exists?(type: role_type.sti_name)
+    participation.roles.create!(type: role_type.sti_name)
+  end
+  participation.update_column(:active, active) # Rollen-Callback setzt sonst ggf. aktiv
+  participation
+end
+
+dana = Person.find_by!(email: "dv-verwaltung@example.com")
+bea = Person.find_by!(email: "bv-verwaltung@example.com")
+mika = Person.find_by!(email: "mitglied@example.com")
+adlerhorst = staemme[stamm_adlerhorst]
+
+# Füllmitglieder in fester Reihenfolge als Kursteilnehmende.
+testbenutzer_ids = testbenutzer.map { |entry| entry[:person].id }
+fuellgruppen = [fuchsbau, adlerhorst].flat_map do |teile|
+  [teile[:mitglieder].id] + teile[:stufen].values.map(&:id)
+end
+fuellmitglieder = Person.joins(:roles)
+  .where(roles: {group_id: fuellgruppen})
+  .where.not(id: testbenutzer_ids)
+  .distinct.order(:id).to_a
+
+# 1 – Stamm, eintägig, vollständig gepflegt
+e1 = seed_event(Event, "Pfingstaktion Fuchsbau", stamm_fuchsbau, {
+  motto: "Gemeinsam unterwegs",
+  description: "Tagesaktion für alle Stufen mit Geländespiel und Grillen.",
+  location: "Stammesheim Fuchsbau, Am Waldrand 12, 50321 Silberbach",
+  cost: "5 €",
+  contact: finn,
+  application_opening_at: heute - 14,
+  application_closing_at: heute + 10,
+  applications_cancelable: true,
+  globally_visible: true
+}, [{label: "Aktionstag", start_at: um(14, 10), finish_at: um(14, 17), location: nil}])
+
+# 2 – Stamm, mehrtägig mit zwei Terminen an verschiedenen Orten
+e2 = seed_event(Event, "Sommerlager Fuchsbau", stamm_fuchsbau, {
+  description: "Eine Woche Zeltlager für Wölflinge bis Rover*innen.",
+  location: "Zeltplatz Silberwald",
+  cost: "180 €",
+  contact: finn,
+  application_opening_at: heute - 30,
+  application_closing_at: heute + 30,
+  applications_cancelable: true,
+  globally_visible: true
+}, [
+  {label: "Vorbereitungstreffen", start_at: um(21, 18), finish_at: um(21, 20),
+   location: "Stammesheim Fuchsbau"},
+  {label: "Lager", start_at: um(42, 14), finish_at: um(48, 12),
+   location: "Zeltplatz Silberwald"}
+])
+teilnehmen(e2, mika, Event::Role::Participant)
+
+# 3 – fremder Stamm, global sichtbar
+seed_event(Event, "Kinoabend Adlerhorst", stamm_adlerhorst, {
+  description: "Filmabend im Gemeindesaal, Gäste aus dem Bezirk willkommen.",
+  location: "Gemeindesaal Adlerbach",
+  application_opening_at: heute - 7,
+  application_closing_at: heute + 18,
+  globally_visible: true
+}, [{label: "Kinoabend", start_at: um(20, 19), finish_at: um(20, 22), location: nil}])
+
+# 4 – fremder Stamm, nicht global sichtbar
+seed_event(Event, "Leiterrunde Adlerhorst", stamm_adlerhorst, {
+  description: "Interne Planungsrunde der Leitenden.",
+  location: "Stammesheim Adlerhorst",
+  globally_visible: false
+}, [{label: "Leiterrunde", start_at: um(9, 19, 30), finish_at: um(9, 21, 30), location: nil}])
+
+# 5 – Bezirkskurs, Anmeldung offen, freie Plätze, Leitung und Anmeldefragen
+e5 = seed_event(Event::Course, "Gruppenleitungskurs Bezirk Silberbach", bezirk, {
+  kind: kursart_gruppenleitung,
+  number: "GLK-SB-1",
+  description: "Zwei Wochenenden Ausbildung für neue Leitende im Bezirk.",
+  location: "Jugendhaus Silberbach",
+  cost: "60 € inkl. Verpflegung",
+  contact: finn,
+  maximum_participants: 12,
+  application_opening_at: heute - 20,
+  application_closing_at: heute + 25,
+  applications_cancelable: true,
+  participations_visible: true,
+  globally_visible: true
+}, [
+  {label: "Wochenende 1", start_at: um(35, 18), finish_at: um(37, 14), location: nil},
+  {label: "Wochenende 2", start_at: um(49, 18), finish_at: um(51, 14), location: nil}
+])
+if e5.application_questions.none?
+  e5.application_questions.create!(question: "Hast du Unverträglichkeiten oder Allergien?",
+    required: false)
+  e5.application_questions.create!(question: "Übernachtest du vor Ort?",
+    choices: "Ja,Nein", required: true)
+end
+teilnehmen(e5, finn, Event::Role::Leader)
+fuellmitglieder.first(4).each do |person|
+  teilnehmen(e5, person, Event::Course::Role::Participant, application: {approved: true})
+end
+teilnehmen(e5, mika, Event::Course::Role::Participant, active: false, application: {})
+
+# 6 – Diözesankurs, Anmeldung öffnet erst später
+seed_event(Event::Course, "Erste-Hilfe-Kurs Diözese Sonnenstein", diozesanverband, {
+  kind: kursart_erste_hilfe,
+  number: "EH-DV-1",
+  description: "Erste Hilfe mit Schwerpunkt Lager und Fahrt.",
+  location: "Diözesanzentrum Sonnenstein",
+  cost: "25 €",
+  maximum_participants: 16,
+  application_opening_at: heute + 21,
+  application_closing_at: heute + 60,
+  globally_visible: true
+}, [{label: "Kurstag", start_at: um(75, 9), finish_at: um(75, 17), location: nil}])
+
+# 7 – Diözesankurs, Anmeldeschluss vorbei, ausgebucht, Warteliste
+e7 = seed_event(Event::Course, "Präventionsschulung Diözese Sonnenstein", diozesanverband, {
+  kind: kursart_praevention,
+  number: "PRÄ-DV-1",
+  description: "Präventionsschulung für Leitende aller Stufen.",
+  location: "Online",
+  maximum_participants: 10,
+  waiting_list: true,
+  application_opening_at: heute - 60,
+  application_closing_at: heute - 5,
+  globally_visible: true
+}, [{label: "Schulung", start_at: um(14, 10), finish_at: um(14, 16), location: nil}])
+teilnehmen(e7, dana, Event::Role::Leader)
+fuellmitglieder.drop(4).first(10).each do |person|
+  teilnehmen(e7, person, Event::Course::Role::Participant, application: {approved: true})
+end
+fuellmitglieder.drop(14).first(2).each do |person|
+  teilnehmen(e7, person, Event::Course::Role::Participant, active: false,
+    application: {waiting_list: true})
+end
+
+# 8 – Bundeskurs mit externer Anmeldung
+seed_event(Event::Course, "Bundeskurs Gruppenleitung", bundesebene, {
+  kind: kursart_gruppenleitung,
+  number: "GLK-BUND-1",
+  description: "Bundesweiter Kurs, Anmeldung auch ohne bestehendes Konto möglich.",
+  location: "Bundeszentrum Westernohe",
+  cost: "120 €",
+  contact: bea,
+  maximum_participants: 20,
+  external_applications: true,
+  application_opening_at: heute - 10,
+  application_closing_at: heute + 40,
+  globally_visible: true
+}, [{label: "Kurswoche", start_at: um(60, 15), finish_at: um(64, 13), location: nil}])
+
+# 9 – Bezirk, nur Pflichtfelder (Leerzustände)
+seed_event(Event, "Bezirksversammlung Silberbach", bezirk, {
+  globally_visible: true
+}, [{label: nil, start_at: um(28, 19), finish_at: um(28, 21, 30), location: nil}])
+
+# 10 – Stamm, bereits vorbei
+seed_event(Event, "Waldputzaktion Fuchsbau", stamm_fuchsbau, {
+  description: "Müllsammeln im Silberwald.",
+  location: "Parkplatz Silberwald",
+  globally_visible: true
+}, [{label: "Aktion", start_at: um(-30, 9), finish_at: um(-30, 13), location: nil}])
+
+Event.find_each(&:refresh_participant_counts!)
+log "  10 Events: 6 Veranstaltungen, 4 Kurse (Stamm, Bezirk, Diözese, Bund)"
+log "  Mika: Teilnahme Sommerlager, offene Bewerbung Gruppenleitungskurs"
+
+# ---------------------------------------------------------------------------
+# 9. OAuth-Anwendung für lokale App-Entwicklung
+# ---------------------------------------------------------------------------
+
+section "OAuth-Anwendung"
+
+# Feste Zugangsdaten, nur lokal gültig – wie das TOTP-Secret oben. Damit kann die
+# NaMi-App ohne Einrichtung gegen http://localhost:3000 entwickelt werden.
+OAUTH_UID = "nami-app-lokal"
+OAUTH_SECRET = "nami-app-lokal-secret"
+
+oauth_app = Oauth::Application.find_or_initialize_by(uid: OAUTH_UID)
+oauth_app.assign_attributes(
+  name: "NaMi App lokal",
+  secret: OAUTH_SECRET,
+  redirect_uri: "de.jlange.nami.app:/oauth/callback",
+  scopes: "openid name email api with_roles",
+  confidential: true,
+  skip_consent_screen: true
+)
+oauth_app.save!
+log "  #{oauth_app.name}: Client-ID #{OAUTH_UID}, Secret #{OAUTH_SECRET}"
+
+# ---------------------------------------------------------------------------
+# 10. Ergebnis für das Startscript
 # ---------------------------------------------------------------------------
 
 testbenutzer.each do |entry|
@@ -381,4 +691,5 @@ Group.unscoped.order(:lft).pluck(:id, :parent_id, :name, :type).each do |id, par
 end
 puts "SEED_TOTP_SECRET|#{TOTP_SECRET}"
 puts "SEED_PASSWORD|#{PASSWORD}"
-puts "SEED_DONE|#{Group.count} Gruppen, #{Person.count} Personen, #{Role.with_inactive.count} Rollen"
+puts "SEED_DONE|#{Group.count} Gruppen, #{Person.count} Personen, #{Role.with_inactive.count} Rollen, " \
+  "#{Event.count} Veranstaltungen"
